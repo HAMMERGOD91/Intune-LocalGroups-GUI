@@ -1,1 +1,1 @@
-See README.md for current WPF v2.1 setup, group search and existing-policy editing instructions.
+See README.md for WPF v2.2 setup, COE partial search, automatic group placement and policy naming.

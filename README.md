@@ -1,10 +1,37 @@
-# Intune Local Groups GUI — WPF v2.1
+# Intune Local Groups GUI — WPF v2.2
 
-Run `Start-GUI.cmd` on Windows with `MainWindow.xaml` beside the script. Use **Install / repair module**, then **Sign in / switch account**. Authentication uses the Microsoft account window and the app-private Graph Authentication 2.39.0 workaround.
+Run `Start-GUI.cmd` on Windows with `MainWindow.xaml` and `CoeGroups.ps1` beside the script. Use **Install / repair module**, then **Sign in / switch account**. Authentication uses the Microsoft account window and the app-private Graph Authentication 2.39.0 workaround.
 
-## Group search
+## COE group search and automatic placement
 
-Under Configure, expand **Search Entra groups (Graph)**. Enter the beginning of a group name, search, select a result and a destination, and add it. Results include both user and device groups; verify the selected group's membership. Names must resolve uniquely during preview. Inform API integration is pending its endpoint, authentication scheme and response documentation.
+Expand **Search COE groups (Graph)**. Search is limited to names beginning with `COE-`. Search fragments are case-insensitive and matched in order, allowing intervening text. Hyphens, spaces and asterisks separate fragments. For example, `mg-baas` or `* mg-baas *` matches `COE-ECE-MG-Research-Baas-Admins`; `dg-baas` matches the corresponding device group. All pages of COE groups are retrieved before local matching; searches may take longer in large directories.
+
+Use Ctrl+click to select several results, then **Add selected groups automatically**:
+
+| Name convention | Destination |
+| --- | --- |
+| COE-<DEPT>-MG-...-Admins | Administrators |
+| COE-<DEPT>-MG-... without -Admins | Both Users and RDP |
+| COE-<DEPT>-DG-... | Device targets |
+
+MG groups must be security groups. DG routing uses your naming convention; verify device membership. Unsupported naming patterns are rejected for automatic placement. Duplicate names are not added twice. Exact duplicate Entra display names still block resolution during preview.
+
+## COE defaults and generated policy names
+
+Configure fixes the local administrator to `coeit` and scope tag to `COE`. The default description identifies the PowerShell GUI. Verify that coeit is the actual built-in administrator name on the targets.
+
+Names are generated from COE department, MG/DG, and the remaining name, removing a trailing -Admins:
+
+| Example group | Policy name |
+| --- | --- |
+| COE-ECE-MG-Research-Baas-Admins | COE-ECE: Set User Groups (Research-Baas) |
+| COE-ECE-DG-Research-Baas | COE-ECE: Set User Groups (Research-Baas) |
+| COE-CEE-MG-Admin-Staff | COE-CEE: Set User Groups (Admin-Staff) |
+| COE-MSE-MG-Faculty-Takamura | COE-MSE: Set User Groups (Faculty-Takamura) |
+
+Adding, changing or removing source/target entries recalculates the name. If groups imply several policy names, the name is cleared; remove unrelated groups or manually enter the intended name. This prevents silently taking the last selected department or PI. Existing-policy editing retains the loaded XML, name, scope tags and assignments until explicitly edited; Configure defaults do not rewrite existing XML.
+
+Inform integration is no longer needed.
 
 ## Existing policies
 

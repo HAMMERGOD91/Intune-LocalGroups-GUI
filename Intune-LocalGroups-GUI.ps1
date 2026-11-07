@@ -31,8 +31,11 @@ $script:runspace.ApartmentState = 'STA'
 $script:runspace.ThreadOptions = 'ReuseThread'
 $script:runspace.Open()
 $script:job = $null
+$script:helpersPath = Join-Path $PSScriptRoot 'CoeGroups.ps1'
+. $script:helpersPath
 $script:worker = {
-    param($Operation, $Config, $Queue, $State, $LogDir)
+    param($Operation, $Config, $Queue, $State, $LogDir, $HelpersPath)
+    . $HelpersPath
     $ErrorActionPreference = 'Stop'
     # 2.41.x has reports of RefreshCacheAsync type-load failures (SDK issue 3816).
     # Use an app-private copy rather than downgrading the operator's other modules.
@@ -122,11 +125,12 @@ $script:worker = {
             }
             'SearchGroups' {
                 if (-not $State.Connected) { throw 'Sign in first.' }
-                if ($Config.Search.Trim().Length -lt 2) { throw 'Enter at least two characters of the group name.' }
-                $filter = [Uri]::EscapeDataString("startswith(displayName,'$($Config.Search.Replace("'", "''"))')")
-                $groups = @(All "https://graph.microsoft.com/v1.0/groups?`$filter=$filter&`$select=id,displayName,securityEnabled&`$top=100")
+                $pattern = Get-CoeSearchPattern $Config.Search
+                Report 'Reading COE groups and matching partial name tokens...'
+                $filter = [Uri]::EscapeDataString("startswith(displayName,'COE-')")
+                $groups = @(All "https://graph.microsoft.com/v1.0/groups?`$filter=$filter&`$select=id,displayName,securityEnabled&`$top=999" | Where-Object { $_.displayName -match '^COE-' -and $_.displayName -match $pattern } | Sort-Object { $_.displayName })
                 $Queue.Enqueue(@{ Kind = 'Groups'; Items = $groups })
-                Report "Found $($groups.Count) groups. Graph results can contain user or device groups; select the appropriate target."
+                Report "Found $($groups.Count) matching COE groups. MG and DG naming determines automatic placement."
             }
             'ListPolicies' {
                 if (-not $State.Connected) { throw 'Sign in first.' }
@@ -315,7 +319,7 @@ if (-not (Test-Path -LiteralPath $xamlPath)) { throw "Missing WPF layout: $xamlP
 $reader = [Xml.XmlReader]::Create($xamlPath)
 try { $window = [Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Dispose() }
 $ui = @{}
-foreach ($controlName in @('SearchBox','SearchButton','GroupResults','DestinationBox','AddGroupButton','PolicyList','ListPoliciesButton','LoadPolicyButton','EditNameBox','EditDescriptionBox','EditXmlBox','PreviewEditButton','SaveEditButton','ExistingPanel','SearchPanel','AuthInputs','TenantBox','InstallButton','ConnectButton','DisconnectButton','AccountText','Tabs','ConfigureTab','ReviewTab','ActivityTab','PolicyInputs','NameBox','DescriptionBox','AdminBox','TagBox','AdminGroupsBox','UserGroupsBox','RdpGroupsBox','TargetsBox','PreviewBox','ActivityBox','BusyBar','LogsButton','PreviewButton','ApplyButton','StatusText')) {
+foreach ($controlName in @('SearchBox','SearchButton','GroupResults','AddGroupButton','PolicyList','ListPoliciesButton','LoadPolicyButton','EditNameBox','EditDescriptionBox','EditXmlBox','PreviewEditButton','SaveEditButton','ExistingPanel','SearchPanel','AuthInputs','TenantBox','InstallButton','ConnectButton','DisconnectButton','AccountText','Tabs','ConfigureTab','ReviewTab','ActivityTab','PolicyInputs','NameBox','DescriptionBox','AdminBox','TagBox','AdminGroupsBox','UserGroupsBox','RdpGroupsBox','TargetsBox','PreviewBox','ActivityBox','BusyBar','LogsButton','PreviewButton','ApplyButton','StatusText')) {
     $ui[$controlName] = $window.FindName($controlName)
 }
 $script:mutable = @($ui.ExistingPanel,$ui.SearchPanel,$ui.PreviewEditButton,$ui.AuthInputs,$ui.PolicyInputs,$ui.InstallButton,$ui.ConnectButton,$ui.DisconnectButton,$ui.PreviewButton)
@@ -332,7 +336,7 @@ function Config {
         PolicyId = $(if ($ui.PolicyList.SelectedItem) { $ui.PolicyList.SelectedItem.Id } else { $null })
         EditName = $ui.EditNameBox.Text; EditDescription = $ui.EditDescriptionBox.Text; EditXml = $ui.EditXmlBox.Text
         Tenant = $ui.TenantBox.Text.Trim()
-        Name = $ui.NameBox.Text.Trim(); Description = $ui.DescriptionBox.Text.Trim(); Admin = $ui.AdminBox.Text.Trim(); Tag = $ui.TagBox.Text.Trim()
+        Name = $ui.NameBox.Text.Trim(); Description = $ui.DescriptionBox.Text.Trim(); Admin = 'coeit'; Tag = 'COE'
         AdminGroups = @(Names $ui.AdminGroupsBox); UserGroups = @(Names $ui.UserGroupsBox); RdpGroups = @(Names $ui.RdpGroupsBox); Targets = @(Names $ui.TargetsBox)
     }
 }
@@ -362,7 +366,7 @@ function Start-Work([string]$Operation) {
     $ui.StatusText.Text = "$Operation in progress..."
     $ps = [PowerShell]::Create(); $ps.Runspace = $script:runspace
     try {
-        [void]$ps.AddScript($script:worker.ToString()).AddArgument($Operation).AddArgument($config).AddArgument($script:queue).AddArgument($script:state).AddArgument($script:logDir)
+        [void]$ps.AddScript($script:worker.ToString()).AddArgument($Operation).AddArgument($config).AddArgument($script:queue).AddArgument($script:state).AddArgument($script:logDir).AddArgument($script:helpersPath)
         $script:job = @{ PS = $ps; Handle = $ps.BeginInvoke(); Operation = $Operation; Failed = $false }
     } catch {
         $ps.Dispose(); $script:job = $null; Refresh-Controls
@@ -394,13 +398,41 @@ $ui.ApplyButton.Add_Click({
     if ([Windows.MessageBox]::Show($window,$message,'Apply Intune policy',[Windows.MessageBoxButton]::YesNo,[Windows.MessageBoxImage]::Warning,[Windows.MessageBoxResult]::No) -eq [Windows.MessageBoxResult]::Yes) { Start-Work 'Apply' }
 })
 
-$ui.DestinationBox.SelectedIndex = 3
 $ui.SearchButton.Add_Click({ Start-Work 'SearchGroups' })
+$ui.SearchBox.Add_KeyDown({ param($sender,$e) if ($e.Key -eq 'Return') { $e.Handled = $true; Start-Work 'SearchGroups' } })
+function Update-CoePolicyName {
+    $allNames = @((Names $ui.AdminGroupsBox)) + @((Names $ui.UserGroupsBox)) + @((Names $ui.RdpGroupsBox)) + @((Names $ui.TargetsBox))
+    $candidates = @($allNames | ForEach-Object { $info = Get-CoeGroupInfo $_; if ($info) { $info.PolicyName } } | Sort-Object -Unique)
+    if ($candidates.Count -eq 1) { $ui.NameBox.Text = $candidates[0] }
+    elseif ($candidates.Count -gt 1) {
+        $ui.NameBox.Text = ''
+        $ui.StatusText.Text = 'Groups describe multiple policies. Remove unrelated groups or enter the intended policy name.'
+    } else { $ui.NameBox.Text = '' }
+}
+foreach ($box in @($ui.AdminGroupsBox,$ui.UserGroupsBox,$ui.RdpGroupsBox,$ui.TargetsBox)) { $box.Add_TextChanged({ Update-CoePolicyName }) }
 $ui.AddGroupButton.Add_Click({
-    $g = $ui.GroupResults.SelectedItem
-    if (-not $g) { Notice 'Select a group first.'; return }
-    $target = @($ui.AdminGroupsBox,$ui.UserGroupsBox,$ui.RdpGroupsBox,$ui.TargetsBox)[$ui.DestinationBox.SelectedIndex]
-    if (@(Names $target) -notcontains $g.displayName) { $target.Text = (@(Names $target) + $g.displayName) -join "`r`n" }
+    $selected = @($ui.GroupResults.SelectedItems)
+    if (-not $selected.Count) { Notice 'Select one or more groups first. Use Ctrl+click to select multiple results.'; return }
+    # Validate the whole selection before adding any entries.
+    foreach ($g in $selected) {
+        $info = Get-CoeGroupInfo $g.displayName
+        if (-not $info) { Notice "Cannot route '$($g.displayName)'. Expected COE-<DEPT>-MG-... or COE-<DEPT>-DG-...."; return }
+        if ($info.Kind -eq 'MG' -and -not $g.SecurityEnabled) { Notice "'$($g.displayName)' is not a security group."; return }
+    }
+    foreach ($g in $selected) {
+        $info = Get-CoeGroupInfo $g.displayName
+        foreach ($destination in $info.Destinations) {
+            $target = switch ($destination) {
+                'Administrators' { $ui.AdminGroupsBox }
+                'Users' { $ui.UserGroupsBox }
+                'RDP' { $ui.RdpGroupsBox }
+                'Devices' { $ui.TargetsBox }
+            }
+            if (@(Names $target) -notcontains $g.displayName) { $target.Text = (@(Names $target) + $g.displayName) -join "`r`n" }
+        }
+        Log "Added $($g.displayName) to $($info.Destinations -join ', ')."
+    }
+    Update-CoePolicyName
 })
 $ui.ListPoliciesButton.Add_Click({ Start-Work 'ListPolicies' })
 $ui.LoadPolicyButton.Add_Click({ Start-Work 'LoadPolicy' })
@@ -417,7 +449,7 @@ function Drain-Events {
     $item = $null
     while ($script:queue.TryDequeue([ref]$item)) {
         switch ($item.Kind) {
-            'Groups' { $ui.GroupResults.ItemsSource = @($item.Items | ForEach-Object { [pscustomobject]@{ Id = $_.id; displayName = $_.displayName; Label = "$($_.displayName) [$($_.id)]" } }) }
+            'Groups' { $ui.GroupResults.ItemsSource = @($item.Items | ForEach-Object { [pscustomobject]@{ Id = $_.id; displayName = $_.displayName; SecurityEnabled = $_.securityEnabled; Label = "$($_.displayName) [$($_.id)]" } }) }
             'Policies' { $ui.PolicyList.ItemsSource = @($item.Items | ForEach-Object { [pscustomobject]@{ Id = $_.id; Label = "$($_.displayName) [$($_.id)]" } }) }
             'LoadedPolicy' { $ui.EditNameBox.Text = $item.Policy.displayName; $ui.EditDescriptionBox.Text = $item.Policy.description; $ui.EditXmlBox.Text = $item.Xml }
             'Log' { Log $item.Text }
@@ -463,7 +495,7 @@ $window.Add_Closing({
         Notice 'Wait for the operation to finish. If sign-in is open, complete or cancel it in the Microsoft window.' 'Operation in progress'
     }
 })
-Log "Ready. WPF v2.1. Log: $script:logFile"
+Log "Ready. WPF v2.2. Log: $script:logFile"
 $timer.Start()
 try { [void]$window.ShowDialog() }
 finally {
