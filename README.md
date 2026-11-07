@@ -1,30 +1,27 @@
-# Intune-LocalGroups-GUI — WPF v2.0
+# Intune Local Groups GUI — WPF v2.1
 
-PowerShell GUI for managing Intune local group policies.
+Run `Start-GUI.cmd` on Windows with `MainWindow.xaml` beside the script. Use **Install / repair module**, then **Sign in / switch account**. Authentication uses the Microsoft account window and the app-private Graph Authentication 2.39.0 workaround.
 
-## Start
+## Group search
 
-1. Clone this repository to Windows using GitHub Desktop.
-2. Double-click `Start-GUI.cmd`. Keep `MainWindow.xaml` beside the PowerShell script.
-3. Select **Install / repair module**, then **Sign in / switch account**.
-4. Enter your groups, select **Resolve and preview**, and review before applying.
+Under Configure, expand **Search Entra groups (Graph)**. Enter the beginning of a group name, search, select a result and a destination, and add it. Results include both user and device groups; verify the selected group's membership. Names must resolve uniquely during preview. Inform API integration is pending its endpoint, authentication scheme and response documentation.
 
-Version 2.0 uses an app-private copy of Microsoft.Graph.Authentication 2.39.0 as a workaround for reported RefreshCacheAsync failures in 2.41.x.
+## Existing policies
 
-**This policy replaces local group membership.** Verify the local administrator and device targets before applying. Windows sign-in and live Intune operations still require validation in your environment.
+Open **Existing policies**, list custom policies, select one and load it. This editor supports dedicated LocalUsersAndGroups custom XML policies, not Settings Catalog or endpoint-security profiles. Edit the name, description and XML, click **Preview existing edit**, review it, then **Save existing policy**. Scope tags and assignments are preserved. A JSON backup is saved before updating, and changes detected since loading block the save.
 
-See [README.txt](README.txt) for full setup, authentication options, policy behavior and limitations.
+Expanded RDP user SIDs cannot reveal their original source group names. Existing membership is therefore edited as XML rather than guessed source groups. XML structural checks do not guarantee device-side acceptance.
 
-## WPF interface
+## Creating policies
 
-- **Configure**: policy details, source groups and device targets.
-- **Review**: resolved policy summary and XML before applying.
-- **Activity**: progress and error messages.
+Configure the local administrator, scope tag, source groups and device targets. Use **Resolve and preview**, then **Apply policy**. Restrict actions replace local membership. Verify the built-in administrator name on every target. This does not create or enable accounts. RDP expansion is a snapshot. Existing assignments are preserved and requested groups added; scope tags are replaced with the selected tag.
 
-The window is defined in `MainWindow.xaml`; PowerShell handles events and Graph operations in a separate STA runspace. A WPF DispatcherTimer updates the interface.
+## Logs and updates
 
-XAML XML structure and control-name references were checked. This environment cannot execute Windows WPF or verify tenant sign-in.
+Logs, XML previews and backups: `C:\temp\Intune Script Logs`.
 
-## Update your local copy
+Close the GUI and use **Git: Pull** in VS Code to retrieve changes, then run `Start-GUI.cmd` again.
 
-Close the GUI. In GitHub Desktop, select this repository, click **Fetch origin**, then **Pull origin** when available. Reopen `Start-GUI.cmd`.
+## Validation
+
+XAML structure and UI control references checked. Windows rendering, PowerShell execution and live tenant operations have not been tested in the delivery environment. Test with a dedicated device group.

@@ -99,7 +99,7 @@ $script:worker = {
                 Report "App-private module $authVersion installed. Select Sign in. Your other Graph installations were not changed."
             }
             'Connect' {
-                $State.Plan = $null; $State.Connected = $false
+                $State.Plan = $null; $State.EditPlan = $null; $State.LoadedPolicy = $null; $State.Connected = $false
                 if (-not (Test-Path -LiteralPath $authManifest)) {
                     throw 'Select Install / repair module first to download the app-private authentication module.'
                 }
@@ -112,25 +112,79 @@ $script:worker = {
                     ContextScope = 'Process'; NoWelcome = $true; ErrorAction = 'Stop'
                 }
                 if ($Config.Tenant) { $p.TenantId = $Config.Tenant }
-                if ($Config.Client) { $p.ClientId = $Config.Client }
-                $previousWamOption = (Get-MgGraphOption).DisableLoginByWAM
-                if ($Config.Browser) {
-                    if (-not $Config.Client -or -not $Config.Tenant) { throw 'Browser sign-in requires both a custom app client ID and tenant ID.' }
-                    Set-MgGraphOption -DisableLoginByWAM $true | Out-Null
-                    Report 'Opening Microsoft sign-in in your web browser. Complete sign-in there.'
-                } else {
-                    Set-MgGraphOption -DisableLoginByWAM $false | Out-Null
-                    Report 'Opening Microsoft interactive sign-in. Check the taskbar if the account window is behind this app.'
-                }
-                try { Connect-MgGraph @p | Out-Null }
-                finally { Set-MgGraphOption -DisableLoginByWAM $previousWamOption | Out-Null }
+                Report 'Opening Microsoft interactive sign-in. Complete the Microsoft account window.'
+                Connect-MgGraph @p | Out-Null
                 $context = Get-MgContext
                 if (-not $context -or $context.AuthType -ne 'Delegated') { throw 'An interactive work or school account connection is required.' }
                 $State.Connected = $true
                 $State.Account = $context.Account; $State.Tenant = $context.TenantId
                 Report "Connected: $($context.Account) | Tenant: $($context.TenantId)"
             }
+            'SearchGroups' {
+                if (-not $State.Connected) { throw 'Sign in first.' }
+                if ($Config.Search.Trim().Length -lt 2) { throw 'Enter at least two characters of the group name.' }
+                $filter = [Uri]::EscapeDataString("startswith(displayName,'$($Config.Search.Replace("'", "''"))')")
+                $groups = @(All "https://graph.microsoft.com/v1.0/groups?`$filter=$filter&`$select=id,displayName,securityEnabled&`$top=100")
+                $Queue.Enqueue(@{ Kind = 'Groups'; Items = $groups })
+                Report "Found $($groups.Count) groups. Graph results can contain user or device groups; select the appropriate target."
+            }
+            'ListPolicies' {
+                if (-not $State.Connected) { throw 'Sign in first.' }
+                $policies = @(All 'https://graph.microsoft.com/beta/deviceManagement/deviceConfigurations' | Where-Object { $_['@odata.type'] -eq '#microsoft.graph.windows10CustomConfiguration' })
+                $Queue.Enqueue(@{ Kind = 'Policies'; Items = $policies })
+            }
+            'LoadPolicy' {
+                $State.Plan = $null
+                if (-not $State.Connected -or -not $Config.PolicyId) { throw 'Sign in and select a policy first.' }
+                $State.EditPlan = $null; $State.LoadedPolicy = $null
+                $policy = Graph GET "https://graph.microsoft.com/beta/deviceManagement/deviceConfigurations/$($Config.PolicyId)"
+                $settings = @($policy.omaSettings)
+                if ($policy['@odata.type'] -ne '#microsoft.graph.windows10CustomConfiguration' -or $settings.Count -ne 1 -or $settings[0].omaUri -ne './Device/Vendor/MSFT/Policy/Config/LocalUsersAndGroups/Configure' -or $settings[0]['@odata.type'] -ne '#microsoft.graph.omaSettingStringXml' -or $settings[0].isEncrypted) {
+                    throw 'The editor supports dedicated LocalUsersAndGroups custom XML policies only. Other profiles must be edited in Intune.'
+                }
+                $xml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($settings[0].value))
+                $State.LoadedPolicy = $policy
+                $Queue.Enqueue(@{ Kind = 'LoadedPolicy'; Policy = $policy; Xml = $xml })
+                Report "Loaded policy $($policy.id). Scope tags and assignments are preserved by this editor."
+            }
+            'PreviewEdit' {
+                $State.Plan = $null
+                $State.EditPlan = $null
+                if (-not $State.Connected -or -not $State.LoadedPolicy) { throw 'Sign in and load a policy first.' }
+                if (-not $Config.EditName.Trim()) { throw 'Enter a policy name.' }
+                $xmlSettings = [Xml.XmlReaderSettings]::new(); $xmlSettings.DtdProcessing = 'Prohibit'; $xmlSettings.XmlResolver = $null
+                $textReader = [IO.StringReader]::new($Config.EditXml)
+                $xmlReader = [Xml.XmlReader]::Create($textReader,$xmlSettings)
+                $doc = [xml]::new(); $doc.XmlResolver = $null
+                try { $doc.Load($xmlReader) } finally { $xmlReader.Dispose(); $textReader.Dispose() }
+                if ($doc.DocumentElement.Name -ne 'GroupConfiguration') { throw 'XML must have a GroupConfiguration root element.' }
+                if (@($doc.SelectNodes('/GroupConfiguration/accessgroup')).Count -eq 0) { throw 'XML must contain at least one accessgroup.' }
+                foreach ($g in $doc.SelectNodes('/GroupConfiguration/accessgroup')) {
+                    if (-not $g.GetAttribute('desc') -or @($g.SelectNodes('group')).Count -ne 1 -or $g.group.action -notin @('R','U')) { throw 'Each accessgroup requires a description and one group action (R or U).' }
+                    foreach ($m in $g.SelectNodes('add|remove')) { if (-not $m.GetAttribute('member')) { throw 'Each member entry requires a member value.' } }
+                }
+                $State.EditPlan = @{ Policy = $State.LoadedPolicy; Name = $Config.EditName; Description = $Config.EditDescription; Xml = $Config.EditXml; Tenant = $State.Tenant }
+                $Queue.Enqueue(@{ Kind = 'Preview'; Text = "EDIT existing policy $($State.LoadedPolicy.id)`r`nName: $($Config.EditName)`r`nTenant: $($State.Tenant)`r`nScope tags and assignments are retained.`r`n`r`n$($Config.EditXml)" })
+                Report 'Edit preview ready. Use Save existing policy to apply these changes.'
+            }
+            'SaveEdit' {
+                $plan = $State.EditPlan; $State.EditPlan = $null
+                if (-not $State.Connected -or -not $plan -or $plan.Tenant -ne $State.Tenant) { throw 'Load and preview the policy again.' }
+                $uri = "https://graph.microsoft.com/beta/deviceManagement/deviceConfigurations/$($plan.Policy.id)"
+                $fresh = Graph GET $uri
+                if ($fresh.lastModifiedDateTime -ne $plan.Policy.lastModifiedDateTime) { throw 'Policy changed since loading. Reload it before editing.' }
+                $backup = @{ Policy = $fresh; Assignments = @(All "$uri/assignments") }
+                $backupPath = Join-Path $LogDir ('LocalGroups_Backup_{0}.json' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+                [IO.File]::WriteAllText($backupPath,($backup | ConvertTo-Json -Depth 50),[Text.UTF8Encoding]::new($false))
+                $old = $fresh.omaSettings[0]
+                $setting = @{ '@odata.type' = '#microsoft.graph.omaSettingStringXml'; displayName = $old.displayName; description = $old.description; omaUri = $old.omaUri; fileName = $old.fileName; value = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($plan.Xml)) }
+                Graph PATCH $uri @{ displayName = $plan.Name; description = $plan.Description; omaSettings = @($setting) } | Out-Null
+                $State.LoadedPolicy = $null
+                Report "Saved policy $($plan.Policy.id). Backup: $backupPath. Reload before making another edit."
+                $Queue.Enqueue(@{ Kind = 'Success'; Text = 'Existing policy saved. Scope tags and assignments retained.' })
+            }
             'Preview' {
+                $State.EditPlan = $null
                 $State.Plan = $null
                 if (-not $State.Connected) { throw 'Sign in first.' }
                 $admin = @(@{ SID = $Config.Admin; Label = 'Preserved local administrator (must exist on every target)' })
@@ -240,7 +294,7 @@ $script:worker = {
             }
             'Disconnect' {
                 if (Get-Command Get-MgContext -ErrorAction SilentlyContinue) { if (Get-MgContext) { Disconnect-MgGraph | Out-Null } }
-                $State.Connected = $false; $State.Plan = $null
+                $State.Connected = $false; $State.Plan = $null; $State.EditPlan = $null; $State.LoadedPolicy = $null
                 Report 'Disconnected.'
             }
         }
@@ -261,10 +315,10 @@ if (-not (Test-Path -LiteralPath $xamlPath)) { throw "Missing WPF layout: $xamlP
 $reader = [Xml.XmlReader]::Create($xamlPath)
 try { $window = [Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Dispose() }
 $ui = @{}
-foreach ($controlName in @('AuthInputs','TenantBox','ClientBox','BrowserCheck','InstallButton','ConnectButton','DisconnectButton','AccountText','Tabs','ConfigureTab','ReviewTab','ActivityTab','PolicyInputs','NameBox','DescriptionBox','AdminBox','TagBox','AdminGroupsBox','UserGroupsBox','RdpGroupsBox','TargetsBox','PreviewBox','ActivityBox','BusyBar','LogsButton','PreviewButton','ApplyButton','StatusText')) {
+foreach ($controlName in @('SearchBox','SearchButton','GroupResults','DestinationBox','AddGroupButton','PolicyList','ListPoliciesButton','LoadPolicyButton','EditNameBox','EditDescriptionBox','EditXmlBox','PreviewEditButton','SaveEditButton','ExistingPanel','SearchPanel','AuthInputs','TenantBox','InstallButton','ConnectButton','DisconnectButton','AccountText','Tabs','ConfigureTab','ReviewTab','ActivityTab','PolicyInputs','NameBox','DescriptionBox','AdminBox','TagBox','AdminGroupsBox','UserGroupsBox','RdpGroupsBox','TargetsBox','PreviewBox','ActivityBox','BusyBar','LogsButton','PreviewButton','ApplyButton','StatusText')) {
     $ui[$controlName] = $window.FindName($controlName)
 }
-$script:mutable = @($ui.AuthInputs,$ui.BrowserCheck,$ui.PolicyInputs,$ui.InstallButton,$ui.ConnectButton,$ui.DisconnectButton,$ui.PreviewButton)
+$script:mutable = @($ui.ExistingPanel,$ui.SearchPanel,$ui.PreviewEditButton,$ui.AuthInputs,$ui.PolicyInputs,$ui.InstallButton,$ui.ConnectButton,$ui.DisconnectButton,$ui.PreviewButton)
 function Log([string]$Text) {
     $line = '[{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'),$Text
     $ui.ActivityBox.AppendText($line + "`r`n")
@@ -274,7 +328,10 @@ function Log([string]$Text) {
 function Names($Control) { @($Control.Text -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique) }
 function Config {
     @{
-        Tenant = $ui.TenantBox.Text.Trim(); Client = $ui.ClientBox.Text.Trim(); Browser = [bool]$ui.BrowserCheck.IsChecked
+        Search = $ui.SearchBox.Text
+        PolicyId = $(if ($ui.PolicyList.SelectedItem) { $ui.PolicyList.SelectedItem.Id } else { $null })
+        EditName = $ui.EditNameBox.Text; EditDescription = $ui.EditDescriptionBox.Text; EditXml = $ui.EditXmlBox.Text
+        Tenant = $ui.TenantBox.Text.Trim()
         Name = $ui.NameBox.Text.Trim(); Description = $ui.DescriptionBox.Text.Trim(); Admin = $ui.AdminBox.Text.Trim(); Tag = $ui.TagBox.Text.Trim()
         AdminGroups = @(Names $ui.AdminGroupsBox); UserGroups = @(Names $ui.UserGroupsBox); RdpGroups = @(Names $ui.RdpGroupsBox); Targets = @(Names $ui.TargetsBox)
     }
@@ -285,6 +342,7 @@ function Notice([string]$Text,[string]$Title = 'Intune local groups',[string]$Ic
 function Refresh-Controls {
     foreach ($c in $script:mutable) { $c.IsEnabled = $true }
     $ui.ApplyButton.IsEnabled = $script:state.Connected -and ($null -ne $script:state.Plan)
+    $ui.SaveEditButton.IsEnabled = $script:state.Connected -and ($null -ne $script:state.EditPlan)
     $ui.BusyBar.Visibility = 'Collapsed'
     if ($script:state.Connected) { $ui.AccountText.Text = "$($script:state.Account) | Tenant: $($script:state.Tenant)" }
     else { $ui.AccountText.Text = 'Not connected' }
@@ -299,6 +357,7 @@ function Start-Work([string]$Operation) {
         if ($config.Admin -match '[\\/@]') { Notice 'Use the existing local administrator account name, without a domain or UPN.' 'Local account required' 'Warning'; return }
     }
     foreach ($c in $script:mutable) { $c.IsEnabled = $false }
+    $ui.SaveEditButton.IsEnabled = $false
     $ui.ApplyButton.IsEnabled = $false; $ui.BusyBar.Visibility = 'Visible'
     $ui.StatusText.Text = "$Operation in progress..."
     $ps = [PowerShell]::Create(); $ps.Runspace = $script:runspace
@@ -319,11 +378,10 @@ foreach ($c in @($ui.NameBox,$ui.DescriptionBox,$ui.AdminBox,$ui.TagBox,$ui.Admi
     $c.Add_TextChanged({ Invalidate-Preview })
 }
 $authChanged = {
-    Invalidate-Preview; $script:state.Connected = $false
+    Invalidate-Preview; $script:state.Connected = $false; $script:state.EditPlan = $null; $script:state.LoadedPolicy = $null; $ui.SaveEditButton.IsEnabled = $false
     $ui.AccountText.Text = 'Sign in to use changed authentication settings'
 }
-$ui.TenantBox.Add_TextChanged($authChanged); $ui.ClientBox.Add_TextChanged($authChanged)
-$ui.BrowserCheck.Add_Checked($authChanged); $ui.BrowserCheck.Add_Unchecked($authChanged)
+$ui.TenantBox.Add_TextChanged($authChanged)
 $ui.InstallButton.Add_Click({ Start-Work 'Install' })
 $ui.ConnectButton.Add_Click({ Start-Work 'Connect' })
 $ui.DisconnectButton.Add_Click({ Start-Work 'Disconnect' })
@@ -335,10 +393,33 @@ $ui.ApplyButton.Add_Click({
     $message = "Apply '$($p.Config.Name)' in tenant $($script:state.Tenant)?`r`n`r`nThis REPLACES membership of Administrators, Users, and Remote Desktop Users on assigned devices. Members absent from the preview can be removed.`r`n`r`nVerify '$($p.Config.Admin)' is the actual built-in administrator name on EVERY target device. This policy does not create or enable it.`r`n`r`nScope tags will be set to '$($p.Config.Tag)'. Existing assignments are kept and selected targets added.`r`n`r`nEmpty RDP sources clear that group's membership. RDP users are a snapshot, not a live group link."
     if ([Windows.MessageBox]::Show($window,$message,'Apply Intune policy',[Windows.MessageBoxButton]::YesNo,[Windows.MessageBoxImage]::Warning,[Windows.MessageBoxResult]::No) -eq [Windows.MessageBoxResult]::Yes) { Start-Work 'Apply' }
 })
+
+$ui.DestinationBox.SelectedIndex = 3
+$ui.SearchButton.Add_Click({ Start-Work 'SearchGroups' })
+$ui.AddGroupButton.Add_Click({
+    $g = $ui.GroupResults.SelectedItem
+    if (-not $g) { Notice 'Select a group first.'; return }
+    $target = @($ui.AdminGroupsBox,$ui.UserGroupsBox,$ui.RdpGroupsBox,$ui.TargetsBox)[$ui.DestinationBox.SelectedIndex]
+    if (@(Names $target) -notcontains $g.displayName) { $target.Text = (@(Names $target) + $g.displayName) -join "`r`n" }
+})
+$ui.ListPoliciesButton.Add_Click({ Start-Work 'ListPolicies' })
+$ui.LoadPolicyButton.Add_Click({ Start-Work 'LoadPolicy' })
+$ui.PreviewEditButton.Add_Click({ Start-Work 'PreviewEdit' })
+foreach ($c in @($ui.EditNameBox,$ui.EditDescriptionBox,$ui.EditXmlBox)) {
+    $c.Add_TextChanged({ $script:state.EditPlan = $null; $ui.SaveEditButton.IsEnabled = $false })
+}
+$ui.SaveEditButton.Add_Click({
+    if (-not $script:state.EditPlan) { return }
+    if ([Windows.MessageBox]::Show($window,'Save the reviewed XML to the loaded existing policy? Restrict (R) actions replace local membership on all currently assigned devices.','Save existing policy','YesNo','Warning','No') -eq 'Yes') { Start-Work 'SaveEdit' }
+})
+
 function Drain-Events {
     $item = $null
     while ($script:queue.TryDequeue([ref]$item)) {
         switch ($item.Kind) {
+            'Groups' { $ui.GroupResults.ItemsSource = @($item.Items | ForEach-Object { [pscustomobject]@{ Id = $_.id; displayName = $_.displayName; Label = "$($_.displayName) [$($_.id)]" } }) }
+            'Policies' { $ui.PolicyList.ItemsSource = @($item.Items | ForEach-Object { [pscustomobject]@{ Id = $_.id; Label = "$($_.displayName) [$($_.id)]" } }) }
+            'LoadedPolicy' { $ui.EditNameBox.Text = $item.Policy.displayName; $ui.EditDescriptionBox.Text = $item.Policy.description; $ui.EditXmlBox.Text = $item.Xml }
             'Log' { Log $item.Text }
             'Preview' { $ui.PreviewBox.Text = $item.Text; $ui.Tabs.SelectedItem = $ui.ReviewTab }
             'Error' {
@@ -382,7 +463,7 @@ $window.Add_Closing({
         Notice 'Wait for the operation to finish. If sign-in is open, complete or cancel it in the Microsoft window.' 'Operation in progress'
     }
 })
-Log "Ready. WPF v2.0. Log: $script:logFile"
+Log "Ready. WPF v2.1. Log: $script:logFile"
 $timer.Start()
 try { [void]$window.ShowDialog() }
 finally {
