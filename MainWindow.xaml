@@ -25,7 +25,7 @@
   <Grid Margin="24">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <StackPanel Margin="0,0,0,20">
-      <TextBlock Text="Local group policy manager" FontSize="28" FontWeight="SemiBold"/>
+      <TextBlock Text="RDP Expanded Groups" FontSize="28" FontWeight="SemiBold"/>
       <TextBlock Text="Microsoft Intune · Resolve groups, review membership, then apply." Foreground="#566980" Margin="0,6,0,0"/>
     </StackPanel>
     <Border Grid.Row="1" Style="{StaticResource Card}">
@@ -49,7 +49,7 @@
           <StackPanel x:Name="PolicyInputs" Margin="20">
             <Expander Header="Search COE groups (Graph)" Margin="0,0,0,16">
               <StackPanel x:Name="SearchPanel">
-                <TextBlock Text="Partial search: mg-baas or *mg-baas* matches COE-ECE-MG-Research-Baas-Admins. Use dg-baas for device groups." TextWrapping="Wrap"/>
+                <TextBlock Text="Partial search (format COE-&lt;dept&gt;-MG-...): ece-mg-baas or *ece-mg-baas* matches COE-ECE-MG-Research-Baas-Admins. Use ece-dg-baas for device groups." TextWrapping="Wrap"/>
                 <TextBox x:Name="SearchBox"/><Button x:Name="SearchButton" Content="Search groups"/>
                 <ListBox x:Name="GroupResults" SelectionMode="Extended" DisplayMemberPath="Label" Height="120" Margin="0,10"/>
                 <TextBlock Text="MG + -Admins → Administrators | Other MG → Users and RDP | DG → Device targets" TextWrapping="Wrap" Margin="0,8"/><Button x:Name="AddGroupButton" Content="Add selected groups automatically" Margin="0,10,0,0"/>

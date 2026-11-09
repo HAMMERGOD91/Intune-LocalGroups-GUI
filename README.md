@@ -4,7 +4,7 @@ Run `Start-GUI.cmd` on Windows with `MainWindow.xaml` and `CoeGroups.ps1` beside
 
 ## COE group search and automatic placement
 
-Expand **Search COE groups (Graph)**. Search is limited to names beginning with `COE-`. Search fragments are case-insensitive and matched in order, allowing intervening text. Hyphens, spaces and asterisks separate fragments. For example, `mg-baas` or `* mg-baas *` matches `COE-ECE-MG-Research-Baas-Admins`; `dg-baas` matches the corresponding device group. All pages of COE groups are retrieved before local matching; searches may take longer in large directories.
+Expand **Search COE groups (Graph)**. Search is limited to names beginning with `COE-`. Search fragments are case-insensitive and matched in order, allowing intervening text. Hyphens, spaces and asterisks separate fragments. Group names follow `COE-<dept>-MG-...` (user groups) and `COE-<dept>-DG-...` (device groups). For example, `ece-mg-baas` or `* ece-mg-baas *` matches `COE-ECE-MG-Research-Baas-Admins`; `ece-dg-baas` matches the corresponding device group. All pages of COE groups are retrieved before local matching; searches may take longer in large directories.
 
 Use Ctrl+click to select several results, then **Add selected groups automatically**:
 

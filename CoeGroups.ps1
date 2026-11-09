@@ -2,7 +2,7 @@
 function Get-CoeSearchPattern {
     param([string]$Query)
     $parts = @($Query.Trim() -split '[\s*\-]+' | Where-Object { $_ })
-    if (($parts -join '').Length -lt 2) { throw 'Enter at least two letters or numbers, for example mg-baas or dg-baas.' }
+    if (($parts -join '').Length -lt 2) { throw 'Enter at least two letters or numbers, for example ece-mg-baas or ece-dg-baas.' }
     # Literal tokens in order; intervening name segments are allowed.
     return (($parts | ForEach-Object { [regex]::Escape($_) }) -join '.*')
 }
